@@ -6,6 +6,8 @@ import org.apache.logging.log4j.Logger;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -15,22 +17,45 @@ public class FileBatchProcessor {
 
     private final String inputLocation;
     private final int chunkSize;
+    private final int parallelism;
     private final int retryCount;
     private final int retryDelaySecs;
-    private final ArrayList<String> buffer;
     private final Consumer<String[]> action;
-    private int lineCount = 0;
 
-    public FileBatchProcessor(String inputLocation, int chunkSize,
+    private int lineCount;
+    private final ArrayList<String> buffer;
+    private final ExecutorService executorService;
+
+
+    public FileBatchProcessor(String inputLocation,
+                              int chunkSize, int parallelism,
                               Consumer<String[]> action,
                               int retryCount, int retryDelaySecs) {
+
         this.inputLocation = inputLocation;
         this.chunkSize = chunkSize;
-        buffer = new ArrayList<>(chunkSize);
+        this.parallelism = parallelism;
         this.action = action;
-
         this.retryCount = retryCount;
         this.retryDelaySecs = retryDelaySecs;
+
+        validateParams();
+
+        lineCount = 0;
+        buffer = new ArrayList<>(chunkSize);
+        executorService =
+                // similar params as delegated inside newFixedThreadPool
+                new ThreadPoolExecutor(
+                        parallelism,
+                        parallelism,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ExecutorBlockingQueue<>(parallelism));
+    }
+
+    private void validateParams() {
+        if (chunkSize < 1 || parallelism < 1 || retryCount < 1 || retryDelaySecs < 0 || action == null)
+            throw new IllegalArgumentException("Provide sensible values for params");
     }
 
     public void run() {
@@ -38,9 +63,11 @@ public class FileBatchProcessor {
         try (Stream<String> lines = Files.lines(Paths.get(inputLocation))) {
 
             lines.forEach(line -> accumulateLine(line.trim()));
-            if (buffer.size() > 0) {
+            if (!buffer.isEmpty()) {
                 queueChunk();
             }
+
+            shutdownAndAwaitTermination();
         } catch (Exception e) {
             logger.error("Error processing file : " + inputLocation, e);
         }
@@ -51,7 +78,7 @@ public class FileBatchProcessor {
 
         if (line.length() > 0) {
             buffer.add(line);
-            if (buffer.size() > chunkSize) {
+            if (buffer.size() >= chunkSize) {
                 queueChunk();
             }
         }
@@ -62,13 +89,14 @@ public class FileBatchProcessor {
         buffer.clear();
 
         logger.info("Queued Chunk ending at line : " + lineCount);
-        processChunk(chunk);
+
+        executorService.submit(() -> processChunk(chunk));
     }
 
     private void processChunk(String[] chunk) {
         for (int i = 0; i < retryCount; ++i) {
             try {
-                System.out.println(Thread.currentThread().getName() + " : Attempt : " + i);
+                logger.info("Attempt : " + i);
                 action.accept(chunk);
                 return;
             } catch (Exception e) {
@@ -87,6 +115,24 @@ public class FileBatchProcessor {
             TimeUnit.SECONDS.sleep(retryDelaySecs);
         } catch (InterruptedException e) {
             logger.error("Interrupted Thread in sleep", e);
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void shutdownAndAwaitTermination() {
+        executorService.shutdown(); // Disable new tasks from being submitted
+        try {
+            // Wait a while for existing tasks to terminate
+            if (!executorService.awaitTermination(30, TimeUnit.MINUTES)) {
+                executorService.shutdownNow(); // Cancel currently executing tasks
+                // Wait a while for tasks to respond to being cancelled
+                if (!executorService.awaitTermination(5, TimeUnit.MINUTES))
+                    logger.error("Pool did not terminate");
+            }
+        } catch (InterruptedException ie) {
+            // (Re-)Cancel if current thread also interrupted
+            executorService.shutdownNow();
+            // Preserve interrupt status
             Thread.currentThread().interrupt();
         }
     }
