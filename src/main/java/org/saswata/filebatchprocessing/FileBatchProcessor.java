@@ -86,32 +86,33 @@ public class FileBatchProcessor {
 
     private void queueChunk() {
         String[] chunk = buffer.toArray(new String[0]);
+        String chunkId = String.valueOf(lineCount);
         buffer.clear();
 
-        logger.info("Queued Chunk ending at line : " + lineCount);
+        logger.info("Queued Chunk ending at line : {}", chunkId);
 
-        executorService.submit(() -> processChunk(chunk));
+        executorService.submit(() -> processChunk(chunk, chunkId));
     }
 
-    private void processChunk(String[] chunk) {
+    private void processChunk(String[] chunk, String chunkId) {
         for (int i = 0; i < retryCount; ++i) {
             try {
-                logger.info("Attempt : " + i);
+                logger.info("Chunk {} Attempt {}", chunkId, i);
                 action.accept(chunk);
                 return;
             } catch (Exception e) {
-                logger.error("Failed Processing Chunk", e);
+                logger.error("Chunk {} Error in Processing", chunkId, e);
                 if (i < retryCount - 1) {
+                    logger.info("Chunk {} Pausing {}s before retry", chunkId, retryDelaySecs);
                     pauseBetweenRetry();
                 }
             }
         }
-        logger.error("Exhausted retries");
+        logger.error("Chunk {} Exhausted retries", chunkId);
     }
 
     private void pauseBetweenRetry() {
         try {
-            logger.info("Pause : " + retryDelaySecs + "s");
             TimeUnit.SECONDS.sleep(retryDelaySecs);
         } catch (InterruptedException e) {
             logger.error("Interrupted Thread in sleep", e);
@@ -129,7 +130,8 @@ public class FileBatchProcessor {
                 if (!executorService.awaitTermination(5, TimeUnit.MINUTES))
                     logger.error("Pool did not terminate");
             }
-        } catch (InterruptedException ie) {
+        } catch (InterruptedException e) {
+            logger.error("Pool shutdown interrupted", e);
             // (Re-)Cancel if current thread also interrupted
             executorService.shutdownNow();
             // Preserve interrupt status
