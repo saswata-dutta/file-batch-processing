@@ -50,7 +50,7 @@ public class FileBatchProcessor {
                         parallelism,
                         0L,
                         TimeUnit.MILLISECONDS,
-                        new ExecutorBlockingQueue<>(parallelism));
+                        new ExecutorBlockingQueue<>(1)); // almost direct handoff
     }
 
     private void validateParams() {
